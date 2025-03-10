@@ -2,16 +2,54 @@ import numpy as np
 import matplotlib.pyplot as plt
 import george
 from george import kernels
-#plt.style.use('seaborn-dark')
 
-# Things to be checked 
-# on pulse bins
-# remember you have plotting option for num_samples
-# make I self.I
-# use inheritance for the class
-# remember - sadly, on_pulse_bins are correspond to the centered profile (phase shifted)
-# orientation of log-polar plot - 180 upwards
-#plotting should be I_fit+yerr and I_fit-yerr & not I_fit+std and I_fit-std?
+# ------------------------------------------------------------------------------
+
+from matplotlib import rcParams
+plt.style.use('default')
+
+# Set global rcParams for consistent plots
+rcParams.update({
+    'figure.dpi': 200,                  # Set the resolution of the figures (dots per inch)
+    'figure.figsize': (8, 6),           # Default figure size (width, height) in inches
+
+    # # box to the plot
+    # 'axes.linewidth': 0.4,              # Set the thickness of the axes spines
+    # 'axes.edgecolor': 'black',          # Set the color of the axes spines
+    # 'axes.spines.top': True,           # Turn off the top spine for the plot
+    # 'axes.spines.right': True,         # Turn off the right spine for the plot
+    
+
+    'font.family': 'serif',             # Use a serif font family
+    'font.size': 14,                    # Set the font size for text in plots
+    'axes.titlesize': 16,               # Font size for axes titles
+    'axes.labelsize': 14,               # Font size for axes labels
+
+
+    'xtick.labelsize': 12,              # Font size for x-axis tick labels
+    'ytick.labelsize': 12,              # Font size for y-axis tick labels
+    'legend.fontsize': 12,              # Font size for legend text
+    'lines.linewidth': 2,               # Line width for plots
+    'lines.markersize': 6,              # Marker size for points
+
+    'savefig.dpi': 300,                 # DPI for saving figures
+    'savefig.format': 'png',            # Default format for saved figures
+
+    'axes.grid': False,                  # Enable grid for axes
+    'grid.alpha': 0.7,                  # Transparency of the grid
+    'grid.color': 'white',               # Grid line color
+
+    'legend.frameon': True,             # Add a frame around the legend
+    'legend.framealpha': 0.8,           # Transparency for the legend frame
+    'legend.fancybox': True,            # Rounded corners for the legend frame
+    'legend.edgecolor': 'black',        # Edge color for the legend frame
+    'legend.facecolor': 'lavender',        # Background color for the legend
+})
+
+# Optional: Set LaTeX for mathematical text (if needed and LaTeX is installed)
+rcParams['text.usetex'] = False
+
+# ------------------------------------------------------------------------------
 
 class PsrWid:
     def __init__(self, I):
@@ -108,7 +146,7 @@ class PsrWid:
             I = self.norm_onezero()
             if on_pulse_bins is not None:                                      # on_pulse_bins are provided
                 off_pulse = self.get_off_pulse(on_pulse_bins, normalized=True)
-            else:                                                              # on_pulse_bins are not provided - default (400, 600
+            else:                                                              # on_pulse_bins are not provided - default (400, 600)
                 off_pulse = self.get_off_pulse(normalized=True)
 
         # NON-NORMALIZED SNR
@@ -261,6 +299,9 @@ class PsrWid:
         else:
             I_fit = I_fit
         
+        # if I_fit[i] <= 0, then log(I_fit[i]) is undefined. So, I_fit[i] = 0 is replaced by np.min(I_fit[I_fit > 0])
+        I_fit[I_fit == 0] = np.min(I_fit[I_fit > 0])
+
         log_I = np.log(I_fit)
         phi = np.linspace(0, 2*np.pi, len(I_fit))
 
@@ -293,7 +334,10 @@ class PsrWid:
                    wid_10=False, 
                    wid_1=False, 
                    get_error=False,
-                   all_info=False) -> np.array:
+                   all_info=False,
+                   remove_width_less_than=0.1,
+                   merge_size=None,
+                   widerr_plot=False) -> np.array:
         """
         Get the widths of the pulse profile at 50%, 10%, and 1% of the peak intensity.
 
@@ -317,7 +361,8 @@ class PsrWid:
         # Widths derived from PsrWid Algorithm
         threshold = self.get_knee_point()
         threshold = np.exp(threshold)
-        widths.append(self.Widths_at_Threshold(phi_fit, I_fit, threshold, all_info=all_info))
+        widths_nom = self.Widths_at_Threshold(phi_fit, I_fit, threshold, all_info=all_info)
+        widths.append(widths_nom)
 
         # W50, W10, W1
         if wid_50:
@@ -338,10 +383,99 @@ class PsrWid:
             threshold_minus = np.exp(threshold_minus) 
             widths_minus = self.Widths_at_Threshold(phi_fit, I_fit, threshold_minus, all_info=True)
 
-            return np.array(widths), np.array(widths_plus), np.array(widths_minus), threshold_plus, threshold_minus
+            # if widths_plus / widths_minus == 0, return empty array and exit (noisy profiles)
+            if len(widths_plus) == 0 or len(widths_minus) == 0:
+                return np.array([[0,0,0]]), threshold, threshold_plus, threshold_minus, std, yerr    
+
+            # Widths +- Error
+            # Here, get_widths() function is incomplete, I want to complete it to get widths+-error. with the function get_widths_at_threshold, I can find widths, and its start and end points. so i have widths plus and widths_minus now (with starting and end points). now, i want to take widths(nominal widths) start and end points and then see if the start point has trailing widths_minus start point & leading widths_plus start point. 
+            # AND, if the widths end point has trailing widths_plus end point and leading widths_minus end point. These will be the errors in the estimation of start and end points of the (nominal) widths.
+
+
+            # merging the widths which are close to each other.--> within 0.15 radians
+            # if end of one width is within 0.15 radians of the start of the next width, merge them and keep everything else same.
+            # Merge widths that are close to each other within `merge_size`.
+
+            if remove_width_less_than is not None:
+                widths_nom = widths_nom[widths_nom[:, 2] > remove_width_less_than]
+
+            if merge_size is not None:
+                merged_widths = []
+                skip_next = False  # Flag to skip the next width if merged
+                
+                for i in range(len(widths_nom)):
+                    if skip_next:  # Skip the current entry if it's already merged
+                        skip_next = False
+                        continue
+
+                    if i < len(widths_nom) - 1 and widths_nom[i, 1] + merge_size >= widths_nom[i + 1, 0]:
+                        # Merge the current width with the next one
+                        merged_widths.append((widths_nom[i, 0], widths_nom[i + 1, 1], widths_nom[i + 1, 1] - widths_nom[i, 0]))
+                        skip_next = True  # Mark the next width as already merged
+                    else:
+                        # No merging needed; keep the current width as is
+                        merged_widths.append(tuple(widths_nom[i]))
+
+                # if widths_nom is empty, return empty array and exit
+                if len(merged_widths) == 0:
+                    return np.array([[0,0,0]]), threshold, threshold_plus, threshold_minus, std, yerr
+                else:
+                    widths_nom = np.array(merged_widths)
+
+
+            nom_start = widths_nom[:, 0]
+            nom_end = widths_nom[:, 1]
+            plus_start = widths_plus[:, 0]
+            plus_end = widths_plus[:, 1]
+            minus_start = widths_minus[:, 0]
+            minus_end = widths_minus[:, 1]
+
+            widths_with_error = []
+            wid_err_plot = []           # for plotting purposes - wid:start/end, trailing/leading start/end
+
+            for i in range(len(widths_nom)):
+                
+                # trailing and leading for start
+                trailing_start = minus_start[minus_start < nom_start[i]].max() if any(minus_start < nom_start[i]) else nom_start[i]
+                leading_start = plus_start[plus_start > nom_start[i]].min() if any(plus_start > nom_start[i]) else nom_start[i]
+
+                # traling and leading for end
+                trailing_end = plus_end[plus_end < nom_end[i]].max() if any(plus_end < nom_end[i]) else nom_end[i]
+                leading_end = minus_end[minus_end > nom_end[i]].min() if any(minus_end > nom_end[i]) else nom_end[i]
+
+                error_plus_width = leading_end - trailing_start
+                error_minus_width = trailing_end - leading_start
+
+                error_plus = np.abs(widths_nom[i, 2] - error_plus_width)
+                error_minus = np.abs(widths_nom[i, 2] - error_minus_width)
+
+                # Avoiding large errors for high SNR profiles
+                # if error_plus > 5 * error_minus, then error_plus = error_minus
+                # if error_minus > 5 * error_plus, then error_minus = error_plus
+                if error_plus > 5 * error_minus:
+                    error_plus = error_minus
+                if error_minus > 5 * error_plus:
+                    error_minus = error_plus
+
+                wid_info = widths_nom[i, 2], error_plus, error_minus
+                widths_with_error.append(wid_info)
+                
+                wid_plt_info = nom_start[i], nom_end[i], trailing_start, leading_start, trailing_end, leading_end
+                wid_err_plot.append(wid_plt_info)
+
+            widths_with_error = np.array(widths_with_error)
+            wid_err_plot = np.array(wid_err_plot)
+
+            if widerr_plot:
+                return wid_err_plot
+            else:
+                return widths_with_error, threshold, threshold_plus, threshold_minus, std, yerr
+                #return widths_nom
         
         else:
             return np.array(widths)
+        
+        
 
     
     def plot_results(self, 
@@ -352,6 +486,9 @@ class PsrWid:
                      bins=500, 
                      PSR_name=None, 
                      get_error=False,
+                     widerr_plot=False,
+                     merge_size=0.1, 
+                     remove_width_less_than=0.1,
                      xlim=(0, 2*np.pi)):
         
         """
@@ -397,6 +534,10 @@ class PsrWid:
                                                   amplitude=amplitude, 
                                                   on_pulse_bins=on_pulse_bins)
         log_I = np.log(I_fit)
+
+        # if I_fit[i] <= 0, then log(I_fit[i]) is undefined. So, I_fit[i] = 0 is replaced by np.min(I_fit[I_fit > 0])
+        I_fit[I_fit == 0] = np.min(I_fit[I_fit > 0])
+
         phi_fit_od = np.linspace(0, 2*np.pi, len(I_fit))  # one-dimensional
         phi_fit = phi_fit_od[:, np.newaxis]
 
@@ -406,9 +547,13 @@ class PsrWid:
             knee_plus, xc_plus, yc_plus, distances_plus = self.get_knee_point(I_fit + std, bins=bins, all_params=True)
             knee_minus, xc_minus, yc_minus, distances_minus = self.get_knee_point(I_fit - std, bins=bins, all_params=True)
 
-            widths, widths_plus, widths_minus, threshold_plus, threshold_minus = self.get_widths(get_error=True, all_info=True)
+            widths_with_error, threshold, threshold_plus, threshold_minus, std, yerr = self.get_widths(get_error=True, all_info=True)
 
-        fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(20, 5), dpi=200)
+        if get_error and widerr_plot:
+            # widths_nom[i, 2], trailing_start, leading_start, trailing_end, leading_end
+            widths_and_errors = self.get_widths(get_error=True, all_info=True, widerr_plot=True, merge_size=merge_size, remove_width_less_than=remove_width_less_than)
+
+        fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(20, 5), dpi=300)
         fig.patch.set_facecolor('white')
 
         # Set the axis background color to white
@@ -424,29 +569,42 @@ class PsrWid:
         ax1.fill_between(phi_fit.flatten(), I_fit - std, I_fit + std, color="steelblue", alpha=0.2, label="1$\sigma$ Confidence")
         ax1.axhline(np.exp(unnormalized_knee_point), color='red', alpha=0.5, lw=1, label='Knee point = %.6f' % np.exp(unnormalized_knee_point))
         ax1.axhline(0, color='black', linestyle='--', alpha=0.5)
+
         # Plot the sample fits
         if num_samples is not None:
             for i in range(len(samples)):
                 ax1.plot(phi_fit, samples[i], color="black", lw=1, alpha=0.2)
-
-        # shading region above the knee point
-        ax1.fill_between(phi_fit_od, np.max(I_fit), 0, where=I_fit > np.exp(unnormalized_knee_point), color='limegreen', alpha=0.1) 
-
-        # Error in Widths
         
+        
+        # Error in Widths
         if get_error:
 
             # horizontal threshold lines
             ax1.axhline(threshold_plus, color='red', alpha=0.2, lw=1)
             ax1.axhline(threshold_minus, color='red', alpha=0.2, lw=1)
             
+            # shading region above the knee point
+            ax1.fill_between(phi_fit_od, np.max(I_fit), 0, where=I_fit > np.exp(unnormalized_knee_point), color='limegreen', alpha=0.1)  
             ax1.fill_between(phi_fit_od, np.max(I_fit), 0, where=I_fit > threshold_plus, color='limegreen', alpha=0.2)
             ax1.fill_between(phi_fit_od, np.max(I_fit), 0, where=I_fit > threshold_minus, color='limegreen', alpha=0.1)
+
+        else:
+            ax1.fill_between(phi_fit_od, np.max(I_fit), 0, where=I_fit > np.exp(unnormalized_knee_point), color='limegreen', alpha=0.4) # changing alpha
+
+
+        if get_error and widerr_plot:
+            for i in range(len(widths_and_errors)):
+                # filling betwwn trailing start and leading end
+                ax1.fill_between([widths_and_errors[i,2], widths_and_errors[i,5]], 0, np.max(I_fit), color='limegreen', alpha=0.1)
+                # filling between trailing end and leading start
+                ax1.fill_between([widths_and_errors[i,4], widths_and_errors[i,3]], 0, np.max(I_fit), color='limegreen', alpha=0.1)
+                # plot the nominal widths
+                ax1.fill_between([widths_and_errors[i,0], widths_and_errors[i,1]], 0, np.max(I_fit), color='limegreen', alpha=0.2) 
 
 
         ax1.set_title('Pulse Profile')
         ax1.set_xlabel('Phase')
-        ax1.set_ylabel('Intensity')
+        ax1.set_ylabel('Normalized Intensity')
         ax1.set_xlim(xlim)
         ax1.legend()
 
@@ -458,7 +616,7 @@ class PsrWid:
         ax2.set_theta_zero_location('S')
 
         num_radial_ticks = 4  # Adjust this number based on your data
-        ax2.set_yticks(np.linspace(np.min(log_I), np.max(log_I), num_radial_ticks))  # Fewer ticks
+        # ax2.set_yticks(np.linspace(np.min(log_I[log_I > 0]), np.max(log_I), num_radial_ticks))
 
         ax2.plot(phi_fit_od, log_I, color='teal')
         ax2.plot(phi_fit_od, unnormalized_knee_point * np.ones_like(phi_fit_od), color='red', alpha=0.5, lw=1)
@@ -474,6 +632,9 @@ class PsrWid:
             ax2.plot(phi_fit_od, np.log(threshold_minus) * np.ones_like(phi_fit_od), color='red', alpha=0.2, lw=1)
             ax2.fill_between(phi_fit_od, 0, min_shade, where=log_I > np.log(threshold_plus), color='limegreen', alpha=0.2)
             ax2.fill_between(phi_fit_od, 0, min_shade, where=log_I > np.log(threshold_minus), color='limegreen', alpha=0.1)
+
+        else:
+            ax2.fill_between(phi_fit_od, 0, min_shade, where=log_I > unnormalized_knee_point, color='limegreen', alpha=0.4)  # changing alpha
 
         # ---------------------------------------------------------------
     
